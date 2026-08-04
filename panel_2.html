@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Сумма Story Points по итерациям</title>
+<script src="https://miro.com/app/static/sdk/v2/miro.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 16px;
+    color: #1a1a1a;
+    background: #fff;
+    font-size: 13px;
+  }
+  h1 { font-size: 15px; margin: 0 0 12px 0; }
+  .controls { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  button {
+    background: #4262ff; color: #fff; border: none; border-radius: 6px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { background: #2f4fe0; }
+  button.secondary { background: #eee; color: #333; }
+  button.secondary:hover { background: #ddd; }
+  label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #555; }
+  input.capacity-input {
+    border: 1px solid #d5d5d5; border-radius: 6px; padding: 4px 6px; font-size: 12px; width: 64px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; }
+  th { color: #666; font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  tr.total-row td { font-weight: 700; border-top: 2px solid #333; }
+  .warn { color: #c25400; font-size: 11px; }
+  .empty { color: #888; padding: 20px 0; text-align: center; }
+  .updated { color: #999; font-size: 11px; margin-top: 10px; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 10px 0 16px 0; font-size: 11px; color: #555; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .load-cell { font-weight: 700; border-radius: 4px; text-align: center; padding: 4px 6px; }
+  .load-yellow    { background: #fff3b0; color: #7a5b00; }
+  .load-green     { background: #b7e6a8; color: #1e5c1e; }
+  .load-darkgreen { background: #2e7d32; color: #fff; }
+  .load-over      { background: #7a1f2b; color: #fff; }
+  .load-none      { color: #aaa; font-weight: 400; text-align: center; }
+  .mode-badge {
+    display: inline-block; font-size: 10px; padding: 2px 6px; border-radius: 4px;
+    background: #eef0ff; color: #3d4ed8; margin-left: 6px;
+  }
+  .format-hint {
+    background: #f6f6f6; border-radius: 6px; padding: 10px 12px; font-size: 12px;
+    margin-bottom: 14px; line-height: 1.5;
+  }
+  .format-hint code { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 1px 5px; }
+  #debugBox {
+    display: none; margin-top: 12px; padding: 10px; background: #f6f6f6;
+    border-radius: 6px; font-family: monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all;
+  }
+</style>
+</head>
+<body>
+
+<h1>Сумма Story Points по итерациям</h1>
+
+<div class="format-hint">
+  Формат: SP указывается в квадратных скобках в конце названия карточки, например
+  <code>Рефакторинг авторизации [8]</code>. Estimate можно оставлять как раньше — приложение его
+  не трогает и не читает, оно смотрит только на название.
+</div>
+
+<div class="controls">
+  <button id="refreshBtn">Обновить</button>
+  <label><input type="checkbox" id="autoRefresh" /> авто-обновление (5с)</label>
+</div>
+
+<div class="controls">
+  <button class="secondary" id="debugBtn">Отладка: показать 1-ю карточку</button>
+</div>
+<div id="debugBox"></div>
+
+<div class="legend">
+  <span><span class="swatch" style="background:#fff3b0;"></span>&lt; 80%</span>
+  <span><span class="swatch" style="background:#b7e6a8;"></span>80–95%</span>
+  <span><span class="swatch" style="background:#2e7d32;"></span>95–100%</span>
+  <span><span class="swatch" style="background:#7a1f2b;"></span>&gt; 100%</span>
+</div>
+
+<div id="result"><div class="empty">Нажмите «Обновить»</div></div>
+<div class="updated" id="updated"></div>
+
+<div class="empty" style="text-align:left; margin-top:16px; font-size:11px;">
+  Приложение сначала пробует группировать карточки по фреймам (если они есть на доске).
+  Если фреймов с карточками нет — группирует по горизонтальному положению карточки относительно
+  текстовых заголовков колонок, содержащих слово "итерац" (например "Итерация 4.1 2026").
+</div>
+
+<script>
+const resultEl = document.getElementById('result');
+const updatedEl = document.getElementById('updated');
+const autoRefreshBox = document.getElementById('autoRefresh');
+const debugBtn = document.getElementById('debugBtn');
+const debugBox = document.getElementById('debugBox');
+const capacityStore = miro.board.storage.collection('iteration-capacity');
+
+let autoTimer = null;
+
+function stripHtml(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html || '';
+  return (div.textContent || div.innerText || '').trim();
+}
+
+// Основной источник SP: число в квадратных скобках в конце названия карточки, например "Задача [8]"
+function extractStoryPoints(card) {
+  const title = stripHtml(card.title || '');
+  const match = title.match(/\[\s*(\d+(?:[.,]\d+)?)\s*\]\s*$/);
+  if (match) {
+    return parseFloat(match[1].replace(',', '.'));
+  }
+  return null;
+}
+
+function tallyCards(cards) {
+  let sum = 0;
+  let without = 0;
+  for (const card of cards) {
+    const sp = extractStoryPoints(card);
+    if (sp === null) without += 1;
+    else sum += sp;
+  }
+  return { count: cards.length, sum, without };
+}
+
+function loadClass(pct) {
+  if (pct > 100) return 'load-over';
+  if (pct >= 95) return 'load-darkgreen';
+  if (pct >= 80) return 'load-green';
+  return 'load-yellow';
+}
+
+function isTypingInCapacity() {
+  return document.activeElement && document.activeElement.classList.contains('capacity-input');
+}
+
+async function saveCapacity(key, rawValue) {
+  const n = parseFloat(String(rawValue).replace(',', '.'));
+  if (isNaN(n) || n < 0) {
+    await capacityStore.remove(key);
+  } else {
+    await capacityStore.set(key, n);
+  }
+}
+
+async function groupByFrames(allCards) {
+  const frames = await miro.board.get({ type: 'frame' });
+  const groups = [];
+  for (const frame of frames) {
+    const children = await frame.getChildren();
+    const cards = children.filter(item => item.type === 'card');
+    if (!cards.length) continue;
+    groups.push({ key: 'frame:' + frame.id, title: frame.title || '(без названия)', cards });
+  }
+  return groups;
+}
+
+async function groupByColumns(allCards) {
+  const texts = await miro.board.get({ type: 'text' });
+  const shapes = await miro.board.get({ type: 'shape' });
+  const headerCandidates = [...texts, ...shapes]
+    .map(item => ({ item, text: stripHtml(item.content) }))
+    .filter(({ text }) => /итерац/i.test(text));
+
+  if (!headerCandidates.length) return null;
+
+  const headers = headerCandidates
+    .map(({ item, text }) => ({
+      title: text.split('\n')[0].trim(),
+      left: item.x - item.width / 2,
+      right: item.x + item.width / 2
+    }))
+    .sort((a, b) => a.left - b.left);
+
+  const groups = headers.map(h => ({ key: 'col:' + h.title, title: h.title, left: h.left, right: h.right, cards: [] }));
+  const unmatched = [];
+
+  for (const card of allCards) {
+    const col = groups.find(g => card.x >= g.left && card.x <= g.right);
+    if (col) col.cards.push(card);
+    else unmatched.push(card);
+  }
+
+  const nonEmpty = groups.filter(g => g.cards.length);
+  if (unmatched.length) {
+    nonEmpty.push({ key: 'unmatched', title: 'Вне колонок итераций', cards: unmatched });
+  }
+  return nonEmpty;
+}
+
+async function computeTotals(isAuto) {
+  if (isAuto && isTypingInCapacity()) return;
+
+  const allCards = await miro.board.get({ type: 'card' });
+  const boardTotal = tallyCards(allCards);
+
+  let groups = await groupByFrames(allCards);
+  let mode = 'Фреймы';
+
+  if (!groups.length) {
+    const colGroups = await groupByColumns(allCards);
+    if (colGroups && colGroups.length) {
+      groups = colGroups;
+      mode = 'Колонки по тексту';
+    }
+  }
+
+  if (!groups.length) {
+    resultEl.innerHTML = `<div class="empty">Не удалось найти ни фреймы, ни заголовки колонок с "Итерация". Итого по всей доске: ${boardTotal.sum} SP (${boardTotal.count} карточек, без оценки: ${boardTotal.without}).</div>`;
+    updatedEl.textContent = 'Обновлено: ' + new Date().toLocaleTimeString();
+    return;
+  }
+
+  const rows = [];
+  for (const g of groups) {
+    const t = tallyCards(g.cards);
+    const capacity = await capacityStore.get(g.key);
+    rows.push({ key: g.key, title: g.title, capacity, ...t });
+  }
+
+  let html = `<div style="margin-bottom:6px;">Режим группировки: <span class="mode-badge">${mode}</span></div>`;
+  html += '<table><thead><tr><th>Итерация</th><th>Карточек</th><th>Σ SP</th><th>Без оценки</th><th>Ёмкость</th><th>Загрузка</th></tr></thead><tbody>';
+  for (const r of rows) {
+    const hasCapacity = typeof r.capacity === 'number' && r.capacity > 0;
+    const pct = hasCapacity ? Math.round((r.sum / r.capacity) * 1000) / 10 : null;
+    const loadCellHtml = hasCapacity
+      ? `<td class="load-cell ${loadClass(pct)}">${pct}%</td>`
+      : `<td class="load-none">—</td>`;
+
+    html += `<tr>
+      <td>${escapeHtml(r.title)}</td>
+      <td>${r.count}</td>
+      <td>${r.sum}</td>
+      <td>${r.without > 0 ? '<span class="warn">' + r.without + '</span>' : '0'}</td>
+      <td><input type="text" class="capacity-input" data-key="${escapeHtml(r.key)}" value="${hasCapacity ? r.capacity : ''}" placeholder="SP" /></td>
+      ${loadCellHtml}
+    </tr>`;
+  }
+  html += `<tr class="total-row">
+    <td>Итого по доске</td>
+    <td>${boardTotal.count}</td>
+    <td>${boardTotal.sum}</td>
+    <td>${boardTotal.without}</td>
+    <td></td><td></td>
+  </tr>`;
+  html += '</tbody></table>';
+
+  resultEl.innerHTML = html;
+  updatedEl.textContent = 'Обновлено: ' + new Date().toLocaleTimeString();
+
+  resultEl.querySelectorAll('.capacity-input').forEach(input => {
+    input.addEventListener('change', async (e) => {
+      await saveCapacity(e.target.dataset.key, e.target.value);
+      computeTotals(false);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') e.target.blur();
+    });
+  });
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, m => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[m]));
+}
+
+debugBtn.addEventListener('click', async () => {
+  const cards = await miro.board.get({ type: 'card' });
+  if (!cards.length) {
+    debugBox.textContent = 'На доске нет карточек типа Card.';
+    debugBox.style.display = 'block';
+    return;
+  }
+  const c = cards[0];
+  const info = {
+    title: c.title,
+    parsedSP: extractStoryPoints(c),
+    x: c.x
+  };
+  debugBox.textContent = JSON.stringify(info, null, 2);
+  debugBox.style.display = 'block';
+});
+
+document.getElementById('refreshBtn').addEventListener('click', () => computeTotals(false));
+
+autoRefreshBox.addEventListener('change', () => {
+  if (autoRefreshBox.checked) {
+    autoTimer = setInterval(() => computeTotals(true), 5000);
+  } else if (autoTimer) {
+    clearInterval(autoTimer);
+    autoTimer = null;
+  }
+});
+
+computeTotals(false);
+</script>
+</body>
+</html>
